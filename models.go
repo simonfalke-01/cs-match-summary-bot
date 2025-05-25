@@ -46,12 +46,13 @@ type Guild struct {
 
 // User represents a user with Steam integration
 type User struct {
-	UUID     uuid.UUID   `json:"uuid" db:"uuid"`
-	SteamID  string      `json:"steam_id" db:"steam_id"`
-	AuthCode string      `json:"auth_code" db:"auth_code"`
-	GameIDs  StringSlice `json:"game_ids" db:"game_ids"`
-	CreatedAt time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt time.Time  `json:"updated_at" db:"updated_at"`
+	UUID          uuid.UUID   `json:"uuid" db:"uuid"`
+	SteamID       string      `json:"steam_id" db:"steam_id"`
+	AuthCode      string      `json:"auth_code" db:"auth_code"`
+	LastShareCode string      `json:"last_share_code" db:"last_share_code"`
+	GameIDs       StringSlice `json:"game_ids" db:"game_ids"`
+	CreatedAt     time.Time   `json:"created_at" db:"created_at"`
+	UpdatedAt     time.Time   `json:"updated_at" db:"updated_at"`
 }
 
 // Game represents a CS match with demo information
@@ -82,6 +83,7 @@ CREATE TABLE IF NOT EXISTS users (
     uuid UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     steam_id VARCHAR(255) UNIQUE NOT NULL,
     auth_code VARCHAR(255) NOT NULL,
+    last_share_code VARCHAR(255) DEFAULT '',
     game_ids JSONB DEFAULT '[]',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP

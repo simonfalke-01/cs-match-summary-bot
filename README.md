@@ -1,6 +1,6 @@
 # CS Match Summary Bot
 
-A Discord bot with webhook functionality for CS match summaries, written in Go. Includes comprehensive data models for managing Discord guilds, Steam users, and CS match data with PostgreSQL integration.
+A Discord bot with webhook functionality for CS match summaries, written in Go. Features automatic Steam API polling, slash commands, and comprehensive data models for managing Discord guilds, Steam users, and CS match data with PostgreSQL integration.
 
 ## Setup
 
@@ -17,8 +17,11 @@ cp .env.example .env
 3. Edit `.env` with your configuration:
 ```
 DISCORD_BOT_TOKEN=your_bot_token_here
+STEAM_API_KEY=your_steam_api_key_here
 WEBHOOK_HOST=localhost
 WEBHOOK_PORT=8080
+WEBHOOK_BASE_URL=https://cs-bot.simonfalke.com
+DEMO_PARSE_BASE_URL=https://cs-demo-parsing.simonfalke.com
 DB_HOST=localhost
 DB_PORT=5432
 DB_USER=postgres
@@ -41,17 +44,19 @@ go run main.go
 
 ### Discord Bot
 - **Auto Guild Registration**: Automatically registers when added to new Discord servers
-- **Rich Commands**: Admin and user commands for managing matches and users
+- **Slash Commands**: Modern Discord slash commands for user interaction
+- **Steam API Polling**: Automatically detects new matches every 10 seconds
 - **Permission System**: Admin commands require proper Discord permissions
 - **Smart Channel Detection**: Automatically finds suitable channels for notifications
 - **Startup Recovery**: Registers existing guilds when bot restarts
 
 ### Webhooks & API
-- **Demo Processing**: `/demoReady` POST endpoint for automatic match processing
+- **Demo Processing**: `/webhooks/demoReady` and `/webhooks/demoParsed` endpoints
 - **REST API**: Query endpoints for matches, users, and guilds
-- **Discord Integration**: Automatic notifications when matches are processed
+- **Discord Integration**: Rich embed notifications when matches are processed
+- **External Service Integration**: Connects to demo parsing services
 - **Error Handling**: Robust error handling with meaningful responses
-- **Configurable host and port**: Via environment variables
+- **Configurable endpoints**: Via environment variables
 
 ### Data Models
 - **Guild Management**: Store Discord guild information with associated users and games
@@ -64,8 +69,11 @@ go run main.go
 The bot uses environment variables for configuration:
 
 - `DISCORD_BOT_TOKEN` - Your Discord bot token (required)
+- `STEAM_API_KEY` - Your Steam API key for polling (required)
 - `WEBHOOK_HOST` - Host for webhook server (default: localhost)
 - `WEBHOOK_PORT` - Port for webhook server (default: 8080)
+- `WEBHOOK_BASE_URL` - Base URL for webhook callbacks (default: https://cs-bot.simonfalke.com)
+- `DEMO_PARSE_BASE_URL` - Base URL for demo parsing service (default: https://cs-demo-parsing.simonfalke.com)
 - `DB_HOST` - Database host (default: localhost)
 - `DB_PORT` - Database port (default: 5432)
 - `DB_USER` - Database username (default: postgres)
@@ -84,8 +92,13 @@ cs-match-summary-bot/
 ├── db.go              # Database connection management
 ├── models.go          # Data model definitions
 ├── database.go        # Database operations (CRUD)
+├── slash_commands.go  # Discord slash command handlers
+├── steam_poller.go    # Steam API polling system
+├── webhook_handlers.go # Webhook processing
+├── guild_manager.go   # Guild management functions
 ├── examples.go        # Usage examples
 ├── DATA_MODELS.md     # Detailed documentation
+├── FEATURES.md        # Complete feature documentation
 ├── .env.example       # Example environment configuration
 └── README.md          # This file
 ```
@@ -100,7 +113,7 @@ The bot includes three main data models:
 
 ### User  
 - Represents Steam users with authentication and game history
-- Fields: UUID, steam_id, auth_code, game_ids[]
+- Fields: UUID, steam_id, auth_code, last_share_code, game_ids[]
 
 ### Game
 - Represents CS matches with demo files and player data
@@ -113,7 +126,7 @@ Comprehensive CRUD operations are available for all models:
 ```go
 // Create entities
 guild, err := createGuild("discord_guild_id", "discord_channel_id")
-user, err := createUser("steam_id", "auth_code")
+user, err := createUser("steam_id", "auth_code", "last_share_code")
 game, err := createGame("share_code", "demo.dem", []string{"steam_id1", "steam_id2"})
 
 // Link entities
@@ -130,39 +143,56 @@ See `DATA_MODELS.md` for complete documentation and `examples.go` for usage exam
 
 ## Discord Commands
 
-The bot provides comprehensive Discord commands for managing matches and users:
+The bot provides modern Discord slash commands for managing matches and users:
 
-### General Commands
+### Slash Commands
+```
+/register                   # Register with Steam ID, auth code, and last share code
+/remove                     # Remove a user from the system
+/users                      # Show list of registered users in the guild
+/set_channel               # Set notification channel (Admin only)
+```
+
+### Legacy Text Commands (Still Available)
 ```
 !cs help          # Show command help
 !cs ping          # Test bot responsiveness
 ```
 
-### Admin Commands (Requires Admin/Manage Server permissions)
-```
-!cs setchannel [#channel]                    # Set notification channel
-!cs stats                                    # Show guild statistics  
-!cs register <steam_id> <auth_code>          # Register a Steam user
-!cs addmatch <share_code> <demo_name> [steam_ids...]  # Add a match manually
-!cs listusers                                # List registered users
-!cs listgames                                # List tracked games
-```
-
 ## Webhook Integration
 
-### Demo Ready Webhook
-Process matches automatically via HTTP webhook:
+### Demo Processing Webhooks
 
+Process demos automatically via HTTP webhooks:
+
+**Demo Ready:**
 ```bash
-POST /demoReady
+POST /webhooks/demoReady
 Content-Type: application/json
 
 {
-    "share_code": "CSGO-XXXXX-XXXXX-XXXXX-XXXXX",
-    "demo_name": "match_2024_01_15_001.dem", 
-    "guild_id": "123456789012345678",
-    "steam_ids": ["76561198000000001", "76561198000000002"],
-    "channel_id": "987654321098765432"  // Optional
+    "success": true,
+    "message": "Demo finished downloading.",
+    "data": {
+        "share_code": "CSGO-XXXXX-XXXXX-XXXXX-XXXXX",
+        "demo_path": "/demos/match_001.dem"
+    }
+}
+```
+
+**Demo Parsed:**
+```bash
+POST /webhooks/demoParsed
+Content-Type: application/json
+
+{
+    "success": true,
+    "message": "Demo parsed.",
+    "data": {
+        "share_code": "CSGO-XXXXX-XXXXX-XXXXX-XXXXX",
+        "demo_path": "/demos/match_001.dem",
+        "stats": "placeholder for future stats implementation"
+    }
 }
 ```
 
@@ -173,6 +203,15 @@ GET /api/v1/user/{steamID}        # Get user information
 GET /api/v1/guild/{guildID}       # Get guild information
 ```
 
+## Steam API Integration
+
+The bot automatically polls Steam API every 10 seconds to detect new matches:
+
+- **Automatic Detection**: Monitors all registered users for new matches
+- **Duplicate Prevention**: Groups users by share code to avoid duplicate downloads
+- **External Integration**: Connects to demo parsing services automatically
+- **Rich Notifications**: Sends detailed match summaries to Discord channels
+
 ## Guild Integration
 
 The bot automatically:
@@ -182,7 +221,7 @@ The bot automatically:
 - **Preserves data** when temporarily removed from servers
 - **Recovers missing guilds** on bot restart
 
-See `GUILD_INTEGRATION.md` for detailed integration documentation.
+See `GUILD_INTEGRATION.md` and `FEATURES.md` for detailed documentation.
 
 ## Database Migration
 

@@ -65,7 +65,7 @@ func registerUserToGuild(guildID, steamID, authCode string) (*User, error) {
 	
 	// Create user if doesn't exist
 	if err == sql.ErrNoRows {
-		user, err = createUser(steamID, authCode)
+		user, err = createUser(steamID, authCode, "")
 		if err != nil {
 			return nil, fmt.Errorf("failed to create user: %w", err)
 		}

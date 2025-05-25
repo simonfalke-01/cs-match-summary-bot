@@ -111,20 +111,21 @@ func addGameToGuild(guildID string, gameUUID uuid.UUID) error {
 // User database operations
 
 // CreateUser inserts a new user into the database
-func createUser(steamID, authCode string) (*User, error) {
+func createUser(steamID, authCode, lastShareCode string) (*User, error) {
 	user := &User{
-		UUID:     uuid.New(),
-		SteamID:  steamID,
-		AuthCode: authCode,
-		GameIDs:  StringSlice{},
+		UUID:          uuid.New(),
+		SteamID:       steamID,
+		AuthCode:      authCode,
+		LastShareCode: lastShareCode,
+		GameIDs:       StringSlice{},
 	}
 
 	query := `
-		INSERT INTO users (uuid, steam_id, auth_code, game_ids)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO users (uuid, steam_id, auth_code, last_share_code, game_ids)
+		VALUES ($1, $2, $3, $4, $5)
 		RETURNING created_at, updated_at`
 
-	err := db.QueryRow(query, user.UUID, user.SteamID, user.AuthCode, user.GameIDs).
+	err := db.QueryRow(query, user.UUID, user.SteamID, user.AuthCode, user.LastShareCode, user.GameIDs).
 		Scan(&user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create user: %w", err)
@@ -137,11 +138,11 @@ func createUser(steamID, authCode string) (*User, error) {
 func getUserBySteamID(steamID string) (*User, error) {
 	user := &User{}
 	query := `
-		SELECT uuid, steam_id, auth_code, game_ids, created_at, updated_at
+		SELECT uuid, steam_id, auth_code, last_share_code, game_ids, created_at, updated_at
 		FROM users WHERE steam_id = $1`
 
 	err := db.QueryRow(query, steamID).Scan(
-		&user.UUID, &user.SteamID, &user.AuthCode, &user.GameIDs,
+		&user.UUID, &user.SteamID, &user.AuthCode, &user.LastShareCode, &user.GameIDs,
 		&user.CreatedAt, &user.UpdatedAt,
 	)
 	if err != nil {
@@ -155,11 +156,11 @@ func getUserBySteamID(steamID string) (*User, error) {
 func getUserByUUID(userUUID uuid.UUID) (*User, error) {
 	user := &User{}
 	query := `
-		SELECT uuid, steam_id, auth_code, game_ids, created_at, updated_at
+		SELECT uuid, steam_id, auth_code, last_share_code, game_ids, created_at, updated_at
 		FROM users WHERE uuid = $1`
 
 	err := db.QueryRow(query, userUUID).Scan(
-		&user.UUID, &user.SteamID, &user.AuthCode, &user.GameIDs,
+		&user.UUID, &user.SteamID, &user.AuthCode, &user.LastShareCode, &user.GameIDs,
 		&user.CreatedAt, &user.UpdatedAt,
 	)
 	if err != nil {
@@ -173,10 +174,10 @@ func getUserByUUID(userUUID uuid.UUID) (*User, error) {
 func updateUser(user *User) error {
 	query := `
 		UPDATE users 
-		SET auth_code = $2, game_ids = $3
+		SET auth_code = $2, last_share_code = $3, game_ids = $4
 		WHERE uuid = $1`
 
-	_, err := db.Exec(query, user.UUID, user.AuthCode, user.GameIDs)
+	_, err := db.Exec(query, user.UUID, user.AuthCode, user.LastShareCode, user.GameIDs)
 	if err != nil {
 		return fmt.Errorf("failed to update user: %w", err)
 	}
@@ -307,6 +308,80 @@ func getGamesBySteamID(steamID string) ([]*Game, error) {
 	}
 
 	return games, nil
+}
+
+// GetAllUsers retrieves all users for polling
+func getAllUsers() ([]*User, error) {
+	query := `
+		SELECT uuid, steam_id, auth_code, last_share_code, game_ids, created_at, updated_at
+		FROM users ORDER BY created_at`
+
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get all users: %w", err)
+	}
+	defer rows.Close()
+
+	var users []*User
+	for rows.Next() {
+		user := &User{}
+		err := rows.Scan(
+			&user.UUID, &user.SteamID, &user.AuthCode, &user.LastShareCode, &user.GameIDs,
+			&user.CreatedAt, &user.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan user: %w", err)
+		}
+		users = append(users, user)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating over users: %w", err)
+	}
+
+	return users, nil
+}
+
+// DeleteUser removes a user from the database
+func deleteUser(steamID string) error {
+	// First get the user to remove from guilds
+	user, err := getUserBySteamID(steamID)
+	if err != nil {
+		return fmt.Errorf("failed to get user: %w", err)
+	}
+
+	// Remove user from all guilds
+	_, err = db.Exec(`
+		UPDATE guilds 
+		SET user_ids = user_ids - $1::text
+		WHERE user_ids @> jsonb_build_array($1::text)`,
+		user.UUID.String())
+	if err != nil {
+		return fmt.Errorf("failed to remove user from guilds: %w", err)
+	}
+
+	// Delete the user
+	_, err = db.Exec(`DELETE FROM users WHERE steam_id = $1`, steamID)
+	if err != nil {
+		return fmt.Errorf("failed to delete user: %w", err)
+	}
+
+	return nil
+}
+
+// UpdateUserLastShareCode updates only the last share code for a user
+func updateUserLastShareCode(steamID, shareCode string) error {
+	query := `
+		UPDATE users 
+		SET last_share_code = $2
+		WHERE steam_id = $1`
+
+	_, err := db.Exec(query, steamID, shareCode)
+	if err != nil {
+		return fmt.Errorf("failed to update user last share code: %w", err)
+	}
+
+	return nil
 }
 
 // GetGamesForGuild retrieves all games associated with a guild

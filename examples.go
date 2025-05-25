@@ -32,7 +32,7 @@ func ExampleUsage() {
 	fmt.Println("\n=== User Operations ===")
 	
 	// Create first user
-	user1, err := createUser("76561198000000001", "auth_code_123")
+	user1, err := createUser("76561198000000001", "auth_code_123", "CSGO-ABCDE-FGHIJ-KLMNO-PQRST")
 	if err != nil {
 		log.Printf("Error creating user1: %v", err)
 		return
@@ -40,7 +40,7 @@ func ExampleUsage() {
 	fmt.Printf("Created user1: %+v\n", user1)
 	
 	// Create second user
-	user2, err := createUser("76561198000000002", "auth_code_456")
+	user2, err := createUser("76561198000000002", "auth_code_456", "CSGO-ZYXWV-UTSRQ-PONML-KJIHG")
 	if err != nil {
 		log.Printf("Error creating user2: %v", err)
 		return

@@ -8,11 +8,15 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/joho/godotenv"
 	"cs-match-summary-bot/webhooks"
 )
+
+// Global Steam poller instance
+var steamPoller *SteamPoller
 
 func main() {
 	// Load .env file
@@ -43,6 +47,7 @@ func main() {
 	dg.AddHandler(guildCreate)
 	dg.AddHandler(guildDelete)
 	dg.AddHandler(ready)
+	dg.AddHandler(handleSlashCommand)
 
 	// Set intents
 	dg.Identify.Intents = discordgo.IntentsGuildMessages | discordgo.IntentMessageContent | discordgo.IntentsGuilds
@@ -51,6 +56,12 @@ func main() {
 	err = dg.Open()
 	if err != nil {
 		log.Fatal("Error opening connection: ", err)
+	}
+
+	// Register slash commands
+	err = registerSlashCommands(dg)
+	if err != nil {
+		log.Fatal("Error registering slash commands: ", err)
 	}
 
 	// Get webhook configuration from environment variables
@@ -66,9 +77,13 @@ func main() {
 	// Set up webhook context with Discord session
 	SetWebhookContext(dg)
 	
+	// Initialize Steam poller
+	steamPoller = NewSteamPoller()
+	
 	// Configure webhook handlers
 	handlers := &webhooks.HandlerFunctions{
 		DemoReady:  HandleDemoReady,
+		DemoParsed: HandleDemoParsed,
 		MatchQuery: HandleMatchQuery,
 		UserQuery:  HandleUserQuery,
 		GuildQuery: HandleGuildQuery,
@@ -81,12 +96,31 @@ func main() {
 		}
 	}()
 
+	// Start Steam API poller
+	go steamPoller.Start()
+
+	// Start cleanup routine for processed codes
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				steamPoller.CleanupProcessedCodes()
+			}
+		}
+	}()
+
 	fmt.Println("Bot is now running. Press CTRL-C to exit.")
 	fmt.Printf("Webhook server listening on %s:%s\n", webhookHost, webhookPort)
+	fmt.Printf("Steam API poller started\n")
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
 	<-sc
 
+	// Stop Steam poller
+	steamPoller.Stop()
+	
 	// Cleanly close down the Discord session
 	dg.Close()
 }

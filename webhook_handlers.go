@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/gin-gonic/gin"
@@ -12,11 +13,23 @@ import (
 
 // DemoReadyPayload represents the webhook payload when a demo is ready
 type DemoReadyPayload struct {
-	ShareCode string   `json:"share_code"`
-	DemoName  string   `json:"demo_name"`
-	GuildID   string   `json:"guild_id"`
-	SteamIDs  []string `json:"steam_ids"`
-	ChannelID string   `json:"channel_id,omitempty"` // Optional, will use guild default if not provided
+	Success bool `json:"success"`
+	Message string `json:"message"`
+	Data struct {
+		ShareCode string `json:"share_code"`
+		DemoPath  string `json:"demo_path"`
+	} `json:"data"`
+}
+
+// DemoParsedPayload represents the webhook payload when a demo is parsed
+type DemoParsedPayload struct {
+	Success bool `json:"success"`
+	Message string `json:"message"`
+	Data struct {
+		ShareCode string      `json:"share_code"`
+		DemoPath  string      `json:"demo_path"`
+		Stats     interface{} `json:"stats"` // Placeholder for future stats implementation
+	} `json:"data"`
 }
 
 // WebhookContext holds the context needed for webhook handlers
@@ -43,64 +56,159 @@ func HandleDemoReady(c *gin.Context) {
 		return
 	}
 	
-	// Validate required fields
-	if payload.ShareCode == "" || payload.DemoName == "" || payload.GuildID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing required fields: share_code, demo_name, guild_id"})
+	// Validate payload structure
+	if !payload.Success {
+		log.Printf("Demo ready webhook reported failure: %s", payload.Message)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Demo processing failed"})
 		return
 	}
 	
-	log.Printf("Processing demo ready for guild %s: %s", payload.GuildID, payload.ShareCode)
+	if payload.Data.ShareCode == "" || payload.Data.DemoPath == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing required fields: share_code, demo_path"})
+		return
+	}
 	
-	// Ensure guild exists in database
-	guild, err := ensureGuildExists(payload.GuildID)
+	log.Printf("Demo ready received: %s at %s", payload.Data.ShareCode, payload.Data.DemoPath)
+	
+	// Create or update game record
+	_, err := createOrUpdateGame(payload.Data.ShareCode, payload.Data.DemoPath)
 	if err != nil {
-		log.Printf("Error ensuring guild exists: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process guild"})
+		log.Printf("Error creating/updating game: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process game"})
 		return
 	}
 	
-	// Process the match
-	game, err := processMatchShare(payload.GuildID, payload.ShareCode, payload.DemoName, payload.SteamIDs)
-	if err != nil {
-		log.Printf("Error processing match: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process match"})
-		return
-	}
-	
-	// Send notification to Discord if session is available
-	if webhookCtx != nil && webhookCtx.DiscordSession != nil {
-		err = sendMatchNotification(guild, game, payload.ChannelID)
+	// Request demo parsing
+	if steamPoller != nil {
+		err = steamPoller.GetDemoParsingRequest()(payload.Data.ShareCode)
 		if err != nil {
-			log.Printf("Error sending Discord notification: %v", err)
+			log.Printf("Error requesting demo parsing for %s: %v", payload.Data.ShareCode, err)
 			// Don't fail the webhook, just log the error
+		} else {
+			log.Printf("Successfully requested demo parsing for %s", payload.Data.ShareCode)
 		}
 	}
 	
-	log.Printf("Successfully processed match %s for guild %s", game.ShareCode, guild.GuildID)
-	
 	c.JSON(http.StatusOK, gin.H{
-		"status":     "success",
-		"game_uuid":  game.UUID.String(),
-		"guild_uuid": guild.UUID.String(),
-		"message":    "Match processed successfully",
+		"status":  "success",
+		"message": "Demo ready processed successfully",
 	})
 }
 
-// sendMatchNotification sends a Discord notification about the new match
-func sendMatchNotification(guild *Guild, game *Game, overrideChannelID string) error {
+// HandleDemoParsed processes the demo parsed webhook
+func HandleDemoParsed(c *gin.Context) {
+	var payload DemoParsedPayload
+	
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		log.Printf("Invalid JSON payload: %v", err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid JSON payload"})
+		return
+	}
+	
+	// Validate payload structure
+	if !payload.Success {
+		log.Printf("Demo parsing webhook reported failure: %s", payload.Message)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Demo parsing failed"})
+		return
+	}
+	
+	if payload.Data.ShareCode == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing required field: share_code"})
+		return
+	}
+	
+	log.Printf("Demo parsing completed for: %s", payload.Data.ShareCode)
+	
+	// Get the game from database
+	game, err := getGameByShareCode(payload.Data.ShareCode)
+	if err != nil {
+		log.Printf("Error getting game %s: %v", payload.Data.ShareCode, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get game"})
+		return
+	}
+	
+	// Send match summary to all guilds that have this game
+	err = sendMatchSummaryToGuilds(game, payload.Data.Stats)
+	if err != nil {
+		log.Printf("Error sending match summaries: %v", err)
+		// Don't fail the webhook, just log the error
+	}
+	
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "success",
+		"message": "Demo parsing completed successfully",
+	})
+}
+
+// createOrUpdateGame creates a new game or updates existing game with demo path
+func createOrUpdateGame(shareCode, demoPath string) (*Game, error) {
+	// Try to get existing game
+	game, err := getGameByShareCode(shareCode)
+	if err == sql.ErrNoRows {
+		// Create new game - we'll get steam IDs when we have the stats
+		game, err = createGame(shareCode, demoPath, []string{})
+		if err != nil {
+			return nil, fmt.Errorf("failed to create game: %w", err)
+		}
+	} else if err != nil {
+		return nil, fmt.Errorf("failed to check existing game: %w", err)
+	} else {
+		// Update existing game
+		game.DemoName = demoPath
+		err = updateGame(game)
+		if err != nil {
+			return nil, fmt.Errorf("failed to update game: %w", err)
+		}
+	}
+	
+	return game, nil
+}
+
+// sendMatchSummaryToGuilds sends match summary to all guilds that have registered users for this match
+func sendMatchSummaryToGuilds(game *Game, stats interface{}) error {
 	if webhookCtx == nil || webhookCtx.DiscordSession == nil {
 		return fmt.Errorf("Discord session not available")
 	}
 	
-	// Determine which channel to use
-	channelID := guild.ChannelID
-	if overrideChannelID != "" {
-		channelID = overrideChannelID
+	// Find all guilds that have users who played in this match
+	guildsToNotify := make(map[string]*Guild)
+	
+	for _, steamID := range game.SteamIDs {
+		user, err := getUserBySteamID(steamID)
+		if err != nil {
+			continue // User not registered, skip
+		}
+		
+		// Find guilds that have this user
+		allGuilds, err := getAllGuilds()
+		if err != nil {
+			continue
+		}
+		
+		for _, guild := range allGuilds {
+			for _, userIDStr := range guild.UserIDs {
+				if userIDStr == user.UUID.String() {
+					guildsToNotify[guild.GuildID] = guild
+				}
+			}
+		}
 	}
 	
-	// Create embed for the match notification
+	// Send notification to each guild
+	for _, guild := range guildsToNotify {
+		err := sendMatchSummary(guild, game, stats)
+		if err != nil {
+			log.Printf("Error sending match summary to guild %s: %v", guild.GuildID, err)
+		}
+	}
+	
+	return nil
+}
+
+// sendMatchSummary sends a match summary embed to a specific guild
+func sendMatchSummary(guild *Guild, game *Game, stats interface{}) error {
 	embed := &discordgo.MessageEmbed{
-		Title: "🎮 New CS Match Demo Ready!",
+		Title: "🎯 CS Match Summary",
 		Color: 0x00ff00,
 		Fields: []*discordgo.MessageEmbedField{
 			{
@@ -120,36 +228,76 @@ func sendMatchNotification(guild *Guild, game *Game, overrideChannelID string) e
 			},
 		},
 		Footer: &discordgo.MessageEmbedFooter{
-			Text: "Match automatically processed via webhook",
+			Text: "Match analysis completed",
 		},
 	}
 	
-	// Add player list if not too many
-	if len(game.SteamIDs) > 0 && len(game.SteamIDs) <= 10 {
-		playerList := ""
-		for i, steamID := range game.SteamIDs {
-			if i > 0 {
-				playerList += "\n"
-			}
-			
-			// Try to get user info from database
-			_, err := getUserBySteamID(steamID)
-			if err == nil {
-				playerList += fmt.Sprintf("• %s", steamID)
-			} else {
-				playerList += fmt.Sprintf("• %s (unregistered)", steamID)
+	// Add registered players for this guild
+	var registeredPlayers []string
+	for _, steamID := range game.SteamIDs {
+		user, err := getUserBySteamID(steamID)
+		if err == nil {
+			// Check if this user is in the current guild
+			for _, userIDStr := range guild.UserIDs {
+				if userIDStr == user.UUID.String() {
+					registeredPlayers = append(registeredPlayers, steamID)
+					break
+				}
 			}
 		}
-		
+	}
+	
+	if len(registeredPlayers) > 0 {
 		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
-			Name:   "Player Steam IDs",
-			Value:  playerList,
+			Name:   "Registered Players",
+			Value:  fmt.Sprintf("```\n%s\n```", strings.Join(registeredPlayers, "\n")),
 			Inline: false,
 		})
 	}
 	
-	_, err := webhookCtx.DiscordSession.ChannelMessageSendEmbed(channelID, embed)
+	// TODO: Add stats fields when stats schema is implemented
+	if stats != nil {
+		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
+			Name:   "Stats",
+			Value:  "📊 Match statistics available (schema TBD)",
+			Inline: false,
+		})
+	}
+	
+	_, err := webhookCtx.DiscordSession.ChannelMessageSendEmbed(guild.ChannelID, embed)
 	return err
+}
+
+// getAllGuilds retrieves all guilds from the database
+func getAllGuilds() ([]*Guild, error) {
+	query := `
+		SELECT uuid, guild_id, channel_id, user_ids, game_ids, created_at, updated_at
+		FROM guilds ORDER BY created_at`
+
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get all guilds: %w", err)
+	}
+	defer rows.Close()
+
+	var guilds []*Guild
+	for rows.Next() {
+		guild := &Guild{}
+		err := rows.Scan(
+			&guild.UUID, &guild.GuildID, &guild.ChannelID, &guild.UserIDs, &guild.GameIDs,
+			&guild.CreatedAt, &guild.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan guild: %w", err)
+		}
+		guilds = append(guilds, guild)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating over guilds: %w", err)
+	}
+
+	return guilds, nil
 }
 
 // HandleMatchQuery handles queries for match information
