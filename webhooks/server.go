@@ -2,17 +2,47 @@ package webhooks
 
 import (
 	"fmt"
-	"net/http"
 
 	"github.com/gin-gonic/gin"
 )
 
-func StartServer(host, port string) error {
-	r := gin.Default()
-	r.POST("/demoReady", demoReadyHandler)
-	return r.Run(fmt.Sprintf("%s:%s", host, port))
+// HandlerFunctions holds all the handler functions that can be injected from main package
+type HandlerFunctions struct {
+	DemoReady   gin.HandlerFunc
+	MatchQuery  gin.HandlerFunc
+	UserQuery   gin.HandlerFunc
+	GuildQuery  gin.HandlerFunc
 }
 
-func demoReadyHandler(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"status": "received"})
+func StartServer(host, port string, handlers *HandlerFunctions) error {
+	r := gin.Default()
+	
+	// Default handler for demoReady if none provided
+	demoReadyHandler := func(c *gin.Context) {
+		c.JSON(200, gin.H{"status": "received"})
+	}
+	if handlers != nil && handlers.DemoReady != nil {
+		demoReadyHandler = handlers.DemoReady
+	}
+	
+	// Webhook endpoints
+	r.POST("/demoReady", demoReadyHandler)
+	
+	// API endpoints for querying data
+	if handlers != nil {
+		api := r.Group("/api/v1")
+		{
+			if handlers.MatchQuery != nil {
+				api.GET("/match/:shareCode", handlers.MatchQuery)
+			}
+			if handlers.UserQuery != nil {
+				api.GET("/user/:steamID", handlers.UserQuery)
+			}
+			if handlers.GuildQuery != nil {
+				api.GET("/guild/:guildID", handlers.GuildQuery)
+			}
+		}
+	}
+	
+	return r.Run(fmt.Sprintf("%s:%s", host, port))
 }
